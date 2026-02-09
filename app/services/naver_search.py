@@ -68,7 +68,7 @@ def extract_post_id(url: str) -> Optional[str]:
 
 
 def search_naver_view(keyword: str, blog_url: str) -> SearchResponse:
-    """네이버 통합 검색에서 특정 글 URL 노출 여부 확인"""
+    """네이버 통합 검색에서 블로그 노출 여부 확인"""
 
     # 입력된 글 URL 정규화
     target_url = normalize_blog_url(blog_url)
@@ -90,7 +90,7 @@ def search_naver_view(keyword: str, blog_url: str) -> SearchResponse:
         is_exposed = False
         exposed_rank = None
         exposed_result = None
-        seen_urls = set()  # 중복 URL 제거용
+        seen_post_ids = set()  # 중복 포스트 ID 제거용
 
         # 모든 블로그 링크 찾기 (포스트 ID가 있는 것만)
         all_links = soup.find_all('a', href=True)
@@ -106,49 +106,30 @@ def search_naver_view(keyword: str, blog_url: str) -> SearchResponse:
             if not post_id:
                 continue
 
-            # 중복 제거
-            normalized_href = normalize_blog_url(href)
-            if normalized_href in seen_urls:
+            # 중복 제거 (포스트 ID 기준)
+            if post_id in seen_post_ids:
                 continue
-            seen_urls.add(normalized_href)
 
-            # 제목 추출 시도
+            # 제목 추출 - 의미있는 텍스트가 있는 링크만 결과로 추가
             title = link.get_text(strip=True)
+            if not title or len(title) <= 3:
+                continue
 
-            # 부모 요소에서 더 많은 정보 추출 시도
-            parent = link.find_parent(['div', 'li', 'article'])
-            description = ""
-            blog_name = ""
-            date = ""
-
-            if parent:
-                # 설명 추출
-                desc_elem = parent.select_one('[class*="dsc"]') or parent.select_one('[class*="desc"]')
-                if desc_elem:
-                    description = desc_elem.get_text(strip=True)
-
-                # 날짜 추출
-                date_elem = parent.select_one('[class*="date"]') or parent.select_one('[class*="time"]')
-                if date_elem:
-                    date = date_elem.get_text(strip=True)
+            seen_post_ids.add(post_id)
 
             rank = len(results) + 1
             result = BlogResult(
                 rank=rank,
-                title=title if title else f"블로그 글 #{rank}",
+                title=title,
                 url=href,
-                description=description,
-                blog_name=blog_name,
-                date=date
+                description="",
+                blog_name="",
+                date=""
             )
             results.append(result)
 
-            # URL 매칭 확인
+            # 포스트 ID로 매칭 확인
             if target_post_id and post_id == target_post_id:
-                is_exposed = True
-                exposed_rank = rank
-                exposed_result = result
-            elif target_url in normalized_href or normalized_href in target_url:
                 is_exposed = True
                 exposed_rank = rank
                 exposed_result = result

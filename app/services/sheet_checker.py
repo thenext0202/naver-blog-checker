@@ -7,6 +7,7 @@ import os
 import re
 import time
 import json
+import threading
 from app.services.naver_search import search_naver_view
 from app.services.blog_fetcher import find_post_by_title, extract_blog_id
 
@@ -14,6 +15,15 @@ SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
     'https://www.googleapis.com/auth/drive'
 ]
+
+# 전역 작업 상태
+task_state = {
+    "status": "idle",      # idle / running / paused / completed / stopped
+    "current": 0,
+    "total": 0,
+    "message": "",
+    "result": None,
+}
 
 SPREADSHEET_ID = os.environ.get('SPREADSHEET_ID', '1me29DkuUo52Lf4MV2i38ZEpWKuOwEEhjtm8gt7jYRgU')
 CREDS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'credentials.json')
@@ -66,6 +76,13 @@ def has_post_id(url: str) -> bool:
     return bool(re.search(r'/\d+(?:\?.*)?$', url.rstrip("'")))
 
 
+def _wait_if_paused():
+    """일시정지 상태이면 재개될 때까지 대기. stopped이면 True 반환."""
+    while task_state["status"] == "paused":
+        time.sleep(0.5)
+    return task_state["status"] == "stopped"
+
+
 def check_sheet_exposure(start_date: str, end_date: str) -> dict:
     """
     구글 시트에서 기간 내 데이터 처리
@@ -79,9 +96,18 @@ def check_sheet_exposure(start_date: str, end_date: str) -> dict:
     - W열 = 비어있음
     """
 
+    task_state["status"] = "running"
+    task_state["current"] = 0
+    task_state["total"] = 0
+    task_state["message"] = "시트 데이터 로딩 중..."
+    task_state["result"] = None
+
     creds = get_credentials()
     if not creds:
-        return {"success": False, "message": "인증 정보가 없습니다. (credentials.json 또는 GOOGLE_CREDENTIALS 환경변수)"}
+        result = {"success": False, "message": "인증 정보가 없습니다. (credentials.json 또는 GOOGLE_CREDENTIALS 환경변수)"}
+        task_state["status"] = "completed"
+        task_state["result"] = result
+        return result
 
     try:
         client = gspread.authorize(creds)
@@ -91,7 +117,15 @@ def check_sheet_exposure(start_date: str, end_date: str) -> dict:
 
         # 1단계: 링크 업데이트 (Q열에 포스트ID 없고 T열=TRUE인 행)
         links_updated = 0
+        task_state["message"] = "링크 업데이트 중..."
+
         for row_idx in range(2, len(all_values)):
+            if _wait_if_paused():
+                result = {"success": True, "message": f"중단됨. 링크 {links_updated}개 업데이트", "processed": 0, "exposed": 0, "links_updated": links_updated}
+                task_state["status"] = "stopped"
+                task_state["result"] = result
+                return result
+
             row = all_values[row_idx]
 
             a_val = row[0].strip() if len(row) > 0 else ""  # A열 (날짜)
@@ -139,19 +173,30 @@ def check_sheet_exposure(start_date: str, end_date: str) -> dict:
                 })
 
         if not rows_to_process and links_updated == 0:
-            return {
+            result = {
                 "success": True,
                 "message": f"처리할 데이터가 없습니다. (기간: {start_date} ~ {end_date})",
                 "processed": 0,
                 "exposed": 0,
                 "links_updated": 0
             }
+            task_state["status"] = "completed"
+            task_state["result"] = result
+            return result
 
         # 노출 체크
         processed = 0
         exposed = 0
+        task_state["total"] = len(rows_to_process)
+        task_state["message"] = f"노출 체크 중... (0/{len(rows_to_process)})"
 
         for row_data in rows_to_process:
+            if _wait_if_paused():
+                result = {"success": True, "message": f"중단됨. 링크 {links_updated}개 업데이트, {processed}개 노출체크, {exposed}개 노출됨", "processed": processed, "exposed": exposed, "links_updated": links_updated}
+                task_state["status"] = "stopped"
+                task_state["result"] = result
+                return result
+
             link = row_data['link']
             keyword = row_data['keyword']
             row_num = row_data['row_num']
@@ -166,15 +211,34 @@ def check_sheet_exposure(start_date: str, end_date: str) -> dict:
 
             sheet.update_cell(row_num, 23, rank_value)  # W열
             processed += 1
+            task_state["current"] = processed
+            task_state["message"] = f"노출 체크 중... ({processed}/{len(rows_to_process)})"
             time.sleep(0.5)
 
-        return {
+        result = {
             "success": True,
             "message": f"완료! 링크 {links_updated}개 업데이트, {processed}개 노출체크, {exposed}개 노출됨",
             "processed": processed,
             "exposed": exposed,
             "links_updated": links_updated
         }
+        task_state["status"] = "completed"
+        task_state["message"] = result["message"]
+        task_state["result"] = result
+        return result
 
     except Exception as e:
-        return {"success": False, "message": f"오류: {str(e)}"}
+        result = {"success": False, "message": f"오류: {str(e)}"}
+        task_state["status"] = "completed"
+        task_state["result"] = result
+        return result
+
+
+def start_check_in_background(start_date: str, end_date: str):
+    """백그라운드 스레드에서 노출 체크 실행"""
+    thread = threading.Thread(
+        target=check_sheet_exposure,
+        args=(start_date, end_date),
+        daemon=True
+    )
+    thread.start()

@@ -60,6 +60,35 @@
                 </button>
             </form>
 
+            <!-- 컨트롤 버튼 -->
+            <div id="controlArea" class="hidden mt-4 grid grid-cols-2 gap-3">
+                <button
+                    id="pauseBtn"
+                    onclick="togglePause()"
+                    class="bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-2.5 px-4 rounded-lg transition duration-200"
+                >
+                    일시정지
+                </button>
+                <button
+                    id="stopBtn"
+                    onclick="stopTask()"
+                    class="bg-red-500 hover:bg-red-600 text-white font-bold py-2.5 px-4 rounded-lg transition duration-200"
+                >
+                    종료
+                </button>
+            </div>
+
+            <!-- 진행률 -->
+            <div id="progressArea" class="hidden mt-4">
+                <div class="flex justify-between text-sm text-gray-600 mb-1">
+                    <span id="progressText">0/0 처리 중...</span>
+                    <span id="progressPercent">0%</span>
+                </div>
+                <div class="w-full bg-gray-200 rounded-full h-2.5">
+                    <div id="progressBar" class="bg-green-500 h-2.5 rounded-full transition-all duration-300" style="width: 0%"></div>
+                </div>
+            </div>
+
             <!-- 결과 영역 -->
             <div id="resultArea" class="hidden mt-6 p-4 rounded-lg text-center">
                 <p id="resultMessage" class="text-lg font-semibold"></p>
@@ -72,8 +101,17 @@
         const submitBtn = document.getElementById('submitBtn');
         const btnText = document.getElementById('btnText');
         const loadingIcon = document.getElementById('loadingIcon');
+        const controlArea = document.getElementById('controlArea');
+        const pauseBtn = document.getElementById('pauseBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const progressArea = document.getElementById('progressArea');
+        const progressText = document.getElementById('progressText');
+        const progressPercent = document.getElementById('progressPercent');
+        const progressBar = document.getElementById('progressBar');
         const resultArea = document.getElementById('resultArea');
         const resultMessage = document.getElementById('resultMessage');
+
+        let pollingTimer = null;
 
         form.addEventListener('submit', async function(e) {
             e.preventDefault();
@@ -101,23 +139,128 @@
 
                 const data = await response.json();
 
-                if (data.success) {
-                    showResult(data.message, true);
+                if (response.ok && data.success) {
+                    showControls(true);
+                    startPolling();
                 } else {
-                    showResult(data.message || '오류가 발생했습니다.', false);
+                    showResult(data.detail || data.message || '오류가 발생했습니다.', false);
+                    setLoading(false);
                 }
 
             } catch (error) {
                 showResult('서버 오류: ' + error.message, false);
-            } finally {
                 setLoading(false);
             }
         });
 
+        function startPolling() {
+            pollingTimer = setInterval(async () => {
+                try {
+                    const res = await fetch('/api/status');
+                    const data = await res.json();
+
+                    // 진행률 업데이트
+                    if (data.total > 0) {
+                        progressArea.classList.remove('hidden');
+                        const pct = Math.round((data.current / data.total) * 100);
+                        progressText.textContent = `${data.current}/${data.total} 처리 중...`;
+                        progressPercent.textContent = `${pct}%`;
+                        progressBar.style.width = `${pct}%`;
+                    } else {
+                        progressText.textContent = data.message;
+                    }
+
+                    // 일시정지 버튼 텍스트 동기화
+                    if (data.status === 'paused') {
+                        pauseBtn.textContent = '재개';
+                        pauseBtn.classList.remove('bg-yellow-500', 'hover:bg-yellow-600');
+                        pauseBtn.classList.add('bg-blue-500', 'hover:bg-blue-600');
+                        progressBar.classList.remove('bg-green-500');
+                        progressBar.classList.add('bg-yellow-500');
+                    } else if (data.status === 'running') {
+                        pauseBtn.textContent = '일시정지';
+                        pauseBtn.classList.remove('bg-blue-500', 'hover:bg-blue-600');
+                        pauseBtn.classList.add('bg-yellow-500', 'hover:bg-yellow-600');
+                        progressBar.classList.remove('bg-yellow-500');
+                        progressBar.classList.add('bg-green-500');
+                    }
+
+                    // 완료/중단
+                    if (data.status === 'completed' || data.status === 'stopped') {
+                        stopPolling();
+                        showControls(false);
+                        setLoading(false);
+
+                        if (data.result) {
+                            showResult(data.result.message, data.result.success);
+                        } else {
+                            showResult(data.message, data.status === 'completed');
+                        }
+
+                        // 진행바 완료 표시
+                        if (data.status === 'completed' && data.total > 0) {
+                            progressBar.style.width = '100%';
+                            progressPercent.textContent = '100%';
+                            progressText.textContent = '완료';
+                        }
+                        if (data.status === 'stopped') {
+                            progressBar.classList.remove('bg-green-500', 'bg-yellow-500');
+                            progressBar.classList.add('bg-red-500');
+                            progressText.textContent = '중단됨';
+                        }
+                    }
+
+                } catch (err) {
+                    // 폴링 오류 무시
+                }
+            }, 1000);
+        }
+
+        function stopPolling() {
+            if (pollingTimer) {
+                clearInterval(pollingTimer);
+                pollingTimer = null;
+            }
+        }
+
+        async function togglePause() {
+            try {
+                await fetch('/api/pause', { method: 'POST' });
+            } catch (err) {
+                // 오류 무시
+            }
+        }
+
+        async function stopTask() {
+            try {
+                await fetch('/api/stop', { method: 'POST' });
+            } catch (err) {
+                // 오류 무시
+            }
+        }
+
+        function showControls(show) {
+            if (show) {
+                controlArea.classList.remove('hidden');
+                progressArea.classList.remove('hidden');
+                // 초기화
+                pauseBtn.textContent = '일시정지';
+                pauseBtn.classList.remove('bg-blue-500', 'hover:bg-blue-600');
+                pauseBtn.classList.add('bg-yellow-500', 'hover:bg-yellow-600');
+                progressBar.classList.remove('bg-yellow-500', 'bg-red-500');
+                progressBar.classList.add('bg-green-500');
+                progressBar.style.width = '0%';
+                progressPercent.textContent = '0%';
+                progressText.textContent = '준비 중...';
+            } else {
+                controlArea.classList.add('hidden');
+            }
+        }
+
         function setLoading(isLoading) {
             submitBtn.disabled = isLoading;
             if (isLoading) {
-                btnText.textContent = '처리 중...';
+                btnText.textContent = '실행 중...';
                 loadingIcon.classList.remove('hidden');
                 submitBtn.classList.add('opacity-75', 'cursor-not-allowed');
             } else {
